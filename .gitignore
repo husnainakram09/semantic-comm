@@ -1,0 +1,79 @@
+# ─────────────────────────────────────────────
+# 🐍 Backend (Flask / Python / ML)
+# ─────────────────────────────────────────────
+backend/__pycache__/
+backend/*.py[cod]
+backend/*.pyo
+
+backend/.env
+backend/.env.*
+backend/venv/
+backend/env/
+backend/.venv/
+
+backend/instance/
+backend/*.sqlite3
+backend/*.db
+
+backend/.pytest_cache/
+backend/.mypy_cache/
+
+# ML / Hugging Face / Torch caches
+backend/.cache/
+backend/hf_cache/
+backend/models/
+backend/torch/
+backend/transformers/
+backend/sentence_transformers/
+
+# logs
+backend/*.log
+backend/logs/
+
+# uploads / temp files
+backend/uploads/
+backend/tmp/
+backend/temp/
+
+# ─────────────────────────────────────────────
+# ⚛️ Frontend (Vite + React)
+# ─────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.vite/
+frontend/.cache/
+
+frontend/.env
+frontend/.env.*
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/pnpm-debug.log*
+
+# ─────────────────────────────────────────────
+# 🧠 IDE / Editor
+# ─────────────────────────────────────────────
+.vscode/
+.idea/
+
+*.swp
+*.swo
+
+# ─────────────────────────────────────────────
+# 🐳 Docker
+# ─────────────────────────────────────────────
+docker-compose.override.yml
+.docker/
+
+# ─────────────────────────────────────────────
+# 🪟 OS files
+# ─────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─────────────────────────────────────────────
+# 📦 Build / packaging
+# ─────────────────────────────────────────────
+*.egg-info/
+build/
+dist/
