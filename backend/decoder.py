@@ -3,8 +3,6 @@ decoder.py
 ----------
 Receiver-side decoder for the Semantic Communication Demo.
 
-Optimized for CPU-only environments (HF Spaces free tier).
-
 Two-step reconstruction pipeline
 ---------------------------------
 1.  Semantic error correction  (caption recovery)
@@ -29,13 +27,13 @@ Two-step reconstruction pipeline
 Model loading strategy
 ----------------------
 Both the SD pipeline and the sentence-transformer are module-level
-singletons loaded at app startup to prevent timeout on first request.
+singletons loaded lazily on the first request.  Subsequent requests
+reuse the cached objects without any reload overhead.
 
 Public API
 ----------
 decode_embedding(noisy_embedding, original_caption, snr_db, seed) → dict
 image_to_base64(pil_image, fmt) → str
-ensure_decoder_models_loaded() → None
 """
 
 import base64
@@ -52,14 +50,6 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Force CPU-only
-os.environ['CUDA_VISIBLE_DEVICES'] = ''
-os.environ['TOKENIZERS_PARALLELISM'] = 'false'
-
-# Set Hugging Face cache directory
-HF_HOME = os.environ.get('HF_HOME', os.path.expanduser('~/.cache/huggingface'))
-os.environ['HF_HOME'] = HF_HOME
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -67,7 +57,7 @@ os.environ['HF_HOME'] = HF_HOME
 
 SD_MODEL_ID     = "runwayml/stable-diffusion-v1-5"
 IMAGE_SIZE      = 512         # SD v1.5 native resolution
-INFERENCE_STEPS = 15          # Reduced for CPU (was 20, now 15 for faster inference)
+INFERENCE_STEPS = 20
 GUIDANCE_SCALE  = 7.5         # classifier-free guidance strength
 
 # SNR decision thresholds (dB)
@@ -79,29 +69,37 @@ FRAC_HIGH   = 1.00
 FRAC_MEDIUM = 0.60
 FRAC_LOW    = 0.30
 
-# Torch device: CPU-only for HF Spaces
-DEVICE: str = "cpu"
+# Torch device: override with env var  DEVICE=cuda
+DEVICE: str = os.environ.get("DEVICE", "cpu")
 
 
 # ---------------------------------------------------------------------------
-# Module-level model cache  (load once at startup, reuse across every request)
+# Module-level model cache  (load once, reuse across every request)
 # ---------------------------------------------------------------------------
 
 _sd_pipe:   object | None = None   # StableDiffusionPipeline
 _st_model:  object | None = None   # SentenceTransformer  (cosine-sim diagnostic)
-_models_loaded: bool = False        # Flag to track initialization
+_sd_loading: bool = False           # guard against concurrent double-load
 
 
 def _load_stable_diffusion() -> None:
     """
     Load the Stable Diffusion v1.5 pipeline into the module-level cache.
-    Called once at app startup via ensure_decoder_models_loaded().
+
+    Thread-safety note: Flask dev server is single-threaded by default.
+    For production (gunicorn + workers) each worker process gets its own
+    copy of the global; no cross-process locking is needed.
     """
-    global _sd_pipe
+    global _sd_pipe, _sd_loading
 
     if _sd_pipe is not None:
-        return                          # already loaded
+        return                          # already loaded — fast path
 
+    if _sd_loading:
+        # Shouldn't happen in single-threaded Flask, but guard anyway
+        raise RuntimeError("SD pipeline is already being loaded by another call.")
+
+    _sd_loading = True
     logger.info(
         "Loading Stable Diffusion pipeline '%s' on device='%s' …",
         SD_MODEL_ID, DEVICE,
@@ -112,30 +110,43 @@ def _load_stable_diffusion() -> None:
         import torch
         from diffusers import StableDiffusionPipeline
 
-        # CPU uses float32 (no float16 support like CUDA)
-        dtype = torch.float32
+        # float16 halves VRAM on GPU; CPU always uses float32
+        dtype = torch.float16 if DEVICE == "cuda" else torch.float32
 
         pipe = StableDiffusionPipeline.from_pretrained(
             SD_MODEL_ID,
             torch_dtype=dtype,
             safety_checker=None,            # disabled for research demo
             requires_safety_checker=False,
-            low_cpu_mem_usage=True,         # Enable memory-efficient loading
         ).to(DEVICE)
 
-        # CPU memory optimization: enable attention slicing
+        # Enable attention slicing for both CUDA and CPU to reduce memory
+        # (CUDA: reduces VRAM; CPU: reduces RAM)
         pipe.enable_attention_slicing()
-        logger.info("Attention slicing enabled for CPU memory efficiency.")
+        logger.info("Attention slicing enabled (reduces memory on both CUDA and CPU).")
+
+        # For CPU, enable sequential offloading to further reduce peak memory
+        # This trades speed for memory by offloading unused parts to disk
+        if DEVICE == "cpu":
+            try:
+                pipe.enable_sequential_cpu_offload()
+                logger.info("Sequential CPU offloading enabled for reduced memory usage.")
+            except Exception as exc:
+                # Sequential offload is optional; continue if unavailable
+                logger.warning("Sequential CPU offloading unavailable: %s", exc)
 
         _sd_pipe = pipe
         logger.info(
-            "✓ Stable Diffusion ready  (%.1f s, dtype=%s, device=%s)",
+            "Stable Diffusion ready  (%.1f s, dtype=%s, device=%s).",
             time.perf_counter() - t0, dtype, DEVICE,
         )
 
     except Exception as exc:
+        _sd_loading = False
         logger.exception("Failed to load Stable Diffusion pipeline.")
         raise RuntimeError(f"Stable Diffusion load failed: {exc}") from exc
+
+    _sd_loading = False
 
 
 def _load_sentence_transformer() -> None:
@@ -153,30 +164,12 @@ def _load_sentence_transformer() -> None:
     try:
         from sentence_transformers import SentenceTransformer
         _st_model = SentenceTransformer("all-MiniLM-L6-v2")
-        _st_model.to(DEVICE)
-        logger.info("✓ Sentence-transformer loaded (decoder)")
+        logger.info("Sentence-transformer loaded (decoder).")
     except Exception as exc:
         logger.warning(
             "Could not load sentence-transformer (%s). "
             "Cosine-sim diagnostics will be unavailable.", exc,
         )
-
-
-def ensure_decoder_models_loaded() -> None:
-    """
-    Public function to ensure all decoder models are loaded.
-    Call this once on app startup to prevent timeout on first request.
-    """
-    global _models_loaded
-    
-    if _models_loaded:
-        return
-    
-    logger.info("Loading decoder models…")
-    _load_stable_diffusion()
-    _load_sentence_transformer()
-    _models_loaded = True
-    logger.info("✓ All decoder models loaded successfully")
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +421,22 @@ def decode_embedding(
         "image_size":              list(pil_image.size),   # [W, H]
         "inference_steps":         INFERENCE_STEPS,
     }
+
+
+# ---------------------------------------------------------------------------
+# Initialization for startup (HF Spaces optimization)
+# ---------------------------------------------------------------------------
+
+def initialize_decoder_models():
+    """
+    Pre-load all decoder models at app startup.
+    This avoids cold-start delays on the first /decode request.
+    Includes Stable Diffusion and optional SentenceTransformer.
+    """
+    logger.info("Pre-loading Stable Diffusion and SentenceTransformer models…")
+    _load_stable_diffusion()
+    _load_sentence_transformer()
+    logger.info("✓ Decoder models loaded successfully")
 
 
 # ---------------------------------------------------------------------------

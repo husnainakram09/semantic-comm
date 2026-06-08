@@ -2,16 +2,15 @@
 app.py
 ------
 Flask REST API for the Semantic Communication Demo.
-
-Optimized for Hugging Face Spaces (CPU-only, port 7860).
+Optimized for Hugging Face Spaces deployment on CPU-only free tier.
 
 Endpoints
 ---------
-GET  /health     – Health check (models must be loaded).
 POST /encode     – Encode an uploaded image → caption + semantic embedding.
 POST /transmit   – Transmit a semantic embedding through a noisy AWGN channel.
 POST /decode     – Reconstruct an image from a noisy semantic embedding via Stable Diffusion.
 POST /metrics    – Compute PSNR / SSIM / BLEU between two images.
+GET  /health     – Liveness check.
 """
 
 import logging
@@ -21,13 +20,16 @@ import sys
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# Force CPU-only environment (HF Spaces free tier)
-os.environ['CUDA_VISIBLE_DEVICES'] = ''
-os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+# Set HuggingFace cache directory to optimize disk usage
+os.environ.setdefault("HF_HOME", "/tmp/hf_cache")
+# Optimize transformers for CPU
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+# Disable safetensors if needed
+os.environ.setdefault("SAFETENSORS_FAST_GPU", "1")
 
-from encoder import encode_image, ensure_encoder_models_loaded
+from encoder import encode_image, initialize_encoder_models
 from channel import simulate_channel
-from decoder import decode_embedding, ensure_decoder_models_loaded
+from decoder import decode_embedding, initialize_decoder_models
 from metrics import compute_all_metrics
 
 # ---------------------------------------------------------------------------
@@ -35,20 +37,54 @@ from metrics import compute_all_metrics
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s — %(message)s'
+    format="%(asctime)s [%(levelname)s] %(name)s – %(message)s"
 )
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(
+    app,
+    resources={r"/*": {"origins": "*"}},
+    methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
 
-# HF Spaces deployment: listen on all interfaces, port 7860
-HOST = "0.0.0.0"
-PORT = int(os.environ.get("PORT", 7860))
-DEVICE = "cpu"  # CPU-only for HF Spaces free tier
+DEVICE = os.environ.get("DEVICE", "cpu")
+logger.info("Device: %s", DEVICE)
 
-logger.info("=== Semantic Communication Demo Backend ===")
-logger.info("Device: %s | Host: %s | Port: %d", DEVICE, HOST, PORT)
+
+# ---------------------------------------------------------------------------
+# Global model initialization (on startup, not per-request)
+# ---------------------------------------------------------------------------
+
+def initialize_models():
+    """Load all ML models at startup to avoid cold-start delays."""
+    logger.info("Initializing ML models at startup…")
+    try:
+        logger.info("Initializing encoder models…")
+        initialize_encoder_models()
+        logger.info("✓ Encoder models ready")
+
+        logger.info("Initializing decoder models…")
+        initialize_decoder_models()
+        logger.info("✓ Decoder models ready")
+
+        logger.info("✓ All models initialized successfully")
+        return True
+    except Exception as exc:
+        logger.exception("Failed to initialize models at startup")
+        return False
+
+
+# Register startup initialization
+@app.before_request
+def before_request():
+    """Ensure models are initialized before first request."""
+    if not getattr(app, "_models_initialized", False):
+        if initialize_models():
+            app._models_initialized = True
+        else:
+            app._models_initialized = False
 
 
 # ---------------------------------------------------------------------------
@@ -60,53 +96,14 @@ def bad_request(msg: str, status: int = 400):
 
 
 # ---------------------------------------------------------------------------
-# Startup initialization — load all models on app startup
-# ---------------------------------------------------------------------------
-
-def initialize_models():
-    """
-    Load all ML models during app startup (before handling requests).
-    This prevents timeout/OOM on first request in HF Spaces environment.
-    """
-    logger.info("Initializing ML models on startup…")
-    try:
-        logger.info("Loading encoder models (BLIP + Sentence Transformer)…")
-        ensure_encoder_models_loaded()
-        logger.info("✓ Encoder models loaded successfully")
-        
-        logger.info("Loading decoder models (Stable Diffusion + Sentence Transformer)…")
-        ensure_decoder_models_loaded()
-        logger.info("✓ Decoder models loaded successfully")
-        
-        logger.info("✓ All models initialized successfully")
-        return True
-    except Exception as exc:
-        logger.exception("CRITICAL: Model initialization failed")
-        # In HF Spaces, we exit with error code so the space won't be marked as healthy
-        sys.exit(1)
-
-
-# Run initialization when app starts (not on first request)
-with app.app_context():
-    initialize_models()
-
-
-# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
 def health():
-    """
-    Health check — returns 200 only if all models are successfully loaded.
-    """
-    return jsonify({
-        "status": "ok",
-        "message": "All models loaded and ready"
-    }), 200
+    return jsonify({"status": "ok"}), 200
 
 
-# ------------------------------------------------------------------
 @app.post("/encode")
 def encode():
     """
@@ -158,8 +155,6 @@ def encode():
     # ── Run the semantic encoder ─────────────────────────────────────────────
     try:
         result = encode_image(image_bytes)
-        print("DEBUG TYPE:", type(result))
-        print("DEBUG KEYS:", result.keys() if isinstance(result, dict) else result)
         logger.info(
             "Encoded '%s' → caption=%r  embedding_dim=%d  tokens=%d",
             image_file.filename,
@@ -551,16 +546,15 @@ def metrics():
 
 
 # ---------------------------------------------------------------------------
-# Entry point — HF Spaces compatible
+# Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    logger.info("Starting Flask server on %s:%d", HOST, PORT)
-    # Run with production-like settings for HF Spaces
-    app.run(
-        host=HOST,
-        port=PORT,
-        debug=False,  # Production mode
-        threaded=True,  # Allow multiple threads
-        use_reloader=False,  # Disable reloader (causes issues on HF Spaces)
-    )
+    # HF Spaces uses port 7860
+    port = int(os.environ.get("PORT", 7860))
+    # Always listen on 0.0.0.0 for external access
+    host = os.environ.get("HOST", "0.0.0.0")
+    debug = os.environ.get("FLASK_ENV", "production") == "development"
+    
+    logger.info("Starting Flask app on %s:%d (debug=%s)", host, port, debug)
+    app.run(host=host, port=port, debug=debug, threaded=True)

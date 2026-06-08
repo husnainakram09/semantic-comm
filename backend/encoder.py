@@ -3,8 +3,6 @@ encoder.py
 ----------
 Semantic image encoder for the Semantic Communication Demo.
 
-Optimized for CPU-only environments (HF Spaces free tier).
-
 Pipeline
 --------
 1. BLIP (Salesforce/blip-image-captioning-base)
@@ -24,9 +22,6 @@ encode_image(image_bytes: bytes) -> dict
         "embedding":   list[float],  # 384-d semantic vector
         "token_count": int,          # number of tokens in the caption
     }
-
-ensure_encoder_models_loaded() -> None
-    Force load of all encoder models at startup (prevents timeout on first request).
 """
 
 import io
@@ -39,30 +34,22 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Force CPU-only
-os.environ['CUDA_VISIBLE_DEVICES'] = ''
-os.environ['TOKENIZERS_PARALLELISM'] = 'false'
-
-# Set Hugging Face cache directory (use /tmp or app directory)
-HF_HOME = os.environ.get('HF_HOME', os.path.expanduser('~/.cache/huggingface'))
-os.environ['HF_HOME'] = HF_HOME
-
-DEVICE: str = "cpu"  # CPU-only for HF Spaces
+# ── Device selection ────────────────────────────────────────────────────────
+DEVICE: str = os.environ.get("DEVICE", "cpu")
 
 
-# ── Module-level model cache ───────────────────────────────────────────────
+# ── Lazy-loaded model holders ───────────────────────────────────────────────
 _blip_processor  = None
 _blip_model      = None
 _sentence_model  = None
-_models_loaded   = False
 
 
 # ---------------------------------------------------------------------------
-# Model loading functions (called once at startup)
+# Private loaders (called once, then cached in module globals)
 # ---------------------------------------------------------------------------
 
 def _load_blip() -> None:
-    """Load BLIP captioning processor + model. Called once at startup."""
+    """Load BLIP captioning processor + model on first use."""
     global _blip_processor, _blip_model
 
     if _blip_processor is not None:
@@ -71,17 +58,15 @@ def _load_blip() -> None:
     logger.info("Loading BLIP captioning model (Salesforce/blip-image-captioning-base)…")
     try:
         from transformers import BlipProcessor, BlipForConditionalGeneration
-        import torch
 
         _blip_processor = BlipProcessor.from_pretrained(
             "Salesforce/blip-image-captioning-base"
         )
         _blip_model = BlipForConditionalGeneration.from_pretrained(
-            "Salesforce/blip-image-captioning-base",
-            torch_dtype=torch.float32,  # CPU uses float32 (no float16 support)
+            "Salesforce/blip-image-captioning-base"
         ).to(DEVICE).eval()
 
-        logger.info("✓ BLIP model loaded on device='%s'", DEVICE)
+        logger.info("BLIP model loaded on device='%s'.", DEVICE)
 
     except Exception as exc:
         logger.exception("Failed to load BLIP model.")
@@ -89,7 +74,7 @@ def _load_blip() -> None:
 
 
 def _load_sentence_transformer() -> None:
-    """Load the sentence-transformer embedding model. Called once at startup."""
+    """Load the sentence-transformer embedding model on first use."""
     global _sentence_model
 
     if _sentence_model is not None:
@@ -100,29 +85,11 @@ def _load_sentence_transformer() -> None:
         from sentence_transformers import SentenceTransformer
 
         _sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
-        _sentence_model.to(DEVICE)
-        logger.info("✓ Sentence-transformer loaded")
+        logger.info("Sentence-transformer loaded.")
 
     except Exception as exc:
         logger.exception("Failed to load sentence-transformer model.")
         raise RuntimeError(f"SentenceTransformer load error: {exc}") from exc
-
-
-def ensure_encoder_models_loaded() -> None:
-    """
-    Public function to ensure all encoder models are loaded.
-    Call this once on app startup to prevent timeout on first request.
-    """
-    global _models_loaded
-    
-    if _models_loaded:
-        return
-    
-    logger.info("Loading encoder models…")
-    _load_blip()
-    _load_sentence_transformer()
-    _models_loaded = True
-    logger.info("✓ All encoder models loaded successfully")
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +234,21 @@ def encode_image(image_bytes: bytes) -> dict:
         "embedding":   embedding.tolist(),   # JSON-serialisable list[float]
         "token_count": token_count,
     }
+
+
+# ---------------------------------------------------------------------------
+# Initialization for startup (HF Spaces optimization)
+# ---------------------------------------------------------------------------
+
+def initialize_encoder_models():
+    """
+    Pre-load all encoder models at app startup.
+    This avoids cold-start delays on the first /encode request.
+    """
+    logger.info("Pre-loading BLIP and SentenceTransformer models…")
+    _load_blip()
+    _load_sentence_transformer()
+    logger.info("✓ Encoder models loaded successfully")
 
 
 # ---------------------------------------------------------------------------
