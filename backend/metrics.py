@@ -42,8 +42,8 @@ compute_all_metrics(original_img_bytes, recon_img_bytes,
 import base64
 import io
 import logging
+import re
 import sys
-from typing import Optional
 
 import numpy as np
 from PIL import Image
@@ -51,7 +51,6 @@ from skimage.metrics import (
     peak_signal_noise_ratio as _skimage_psnr,
     structural_similarity   as _skimage_ssim,
 )
-import nltk
 from nltk.translate.bleu_score import (
     sentence_bleu,
     SmoothingFunction,
@@ -61,29 +60,11 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# NLTK data — download silently on first import if not already present
+# NLTK data is not downloaded at runtime on Spaces.
 # ---------------------------------------------------------------------------
 
-def _ensure_nltk_data() -> None:
-    """Download punkt tokeniser data if missing (one-time, ~13 KB)."""
-    try:
-        nltk.data.find("tokenizers/punkt_tab")
-    except LookupError:
-        try:
-            nltk.download("punkt_tab", quiet=True)
-        except Exception:
-            pass  # offline env — fall back to whitespace tokenisation
-
-    try:
-        nltk.data.find("tokenizers/punkt")
-    except LookupError:
-        try:
-            nltk.download("punkt", quiet=True)
-        except Exception:
-            pass
-
-
-_ensure_nltk_data()
+# Avoid runtime downloads on Hugging Face Spaces cold starts. BLEU uses a
+# lightweight regex tokenizer below, so punkt data is not required.
 
 
 # ---------------------------------------------------------------------------
@@ -158,10 +139,7 @@ def _tokenise(text: str) -> list[str]:
     falls back to a simple ``str.split()`` if NLTK data is unavailable
     (e.g. in a fully offline environment).
     """
-    try:
-        return nltk.word_tokenize(text.lower())
-    except Exception:
-        return text.lower().split()
+    return re.findall(r"\b\w+\b", text.lower())
 
 
 # ---------------------------------------------------------------------------

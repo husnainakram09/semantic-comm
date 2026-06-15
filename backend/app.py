@@ -2,7 +2,6 @@
 app.py
 ------
 Flask REST API for the Semantic Communication Demo.
-Optimized for Hugging Face Spaces deployment on CPU-only free tier.
 
 Endpoints
 ---------
@@ -15,76 +14,38 @@ GET  /health     – Liveness check.
 
 import logging
 import os
-import sys
+
+# Hugging Face Spaces listens on 7860 by default. Set cache locations before
+# importing transformers/diffusers/sentence-transformers anywhere downstream.
+os.environ.setdefault("PORT", "7860")
+os.environ.setdefault("DEVICE", "cpu")
+os.environ.setdefault("HF_HOME", os.path.join(os.path.expanduser("~"), ".cache", "huggingface"))
+os.environ.setdefault("TRANSFORMERS_CACHE", os.path.join(os.environ["HF_HOME"], "transformers"))
+os.environ.setdefault("DIFFUSERS_CACHE", os.path.join(os.environ["HF_HOME"], "diffusers"))
+os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", os.path.join(os.environ["HF_HOME"], "sentence-transformers"))
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("OMP_NUM_THREADS", os.environ.get("CPU_NUM_THREADS", "2"))
+os.environ.setdefault("MKL_NUM_THREADS", os.environ.get("CPU_NUM_THREADS", "2"))
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# Set HuggingFace cache directory to optimize disk usage
-os.environ.setdefault("HF_HOME", "/tmp/hf_cache")
-# Optimize transformers for CPU
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-# Disable safetensors if needed
-os.environ.setdefault("SAFETENSORS_FAST_GPU", "1")
-
-from encoder import encode_image, initialize_encoder_models
+from encoder import encode_image
 from channel import simulate_channel
-from decoder import decode_embedding, initialize_decoder_models
+from decoder import decode_embedding
 from metrics import compute_all_metrics
 
 # ---------------------------------------------------------------------------
 # App setup
 # ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s – %(message)s"
-)
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(
-    app,
-    resources={r"/*": {"origins": "*"}},
-    methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type"],
-)
+app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_UPLOAD_BYTES", 8 * 1024 * 1024))
+CORS(app, resources={r"/*": {"origins": "*"}})   # allow Vite dev server
 
-DEVICE = os.environ.get("DEVICE", "cpu")
-logger.info("Device: %s", DEVICE)
-
-
-# ---------------------------------------------------------------------------
-# Global model initialization (on startup, not per-request)
-# ---------------------------------------------------------------------------
-
-def initialize_models():
-    """Load all ML models at startup to avoid cold-start delays."""
-    logger.info("Initializing ML models at startup…")
-    try:
-        logger.info("Initializing encoder models…")
-        initialize_encoder_models()
-        logger.info("✓ Encoder models ready")
-
-        logger.info("Initializing decoder models…")
-        initialize_decoder_models()
-        logger.info("✓ Decoder models ready")
-
-        logger.info("✓ All models initialized successfully")
-        return True
-    except Exception as exc:
-        logger.exception("Failed to initialize models at startup")
-        return False
-
-
-# Register startup initialization
-@app.before_request
-def before_request():
-    """Ensure models are initialized before first request."""
-    if not getattr(app, "_models_initialized", False):
-        if initialize_models():
-            app._models_initialized = True
-        else:
-            app._models_initialized = False
+DEVICE = "cpu"
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +65,7 @@ def health():
     return jsonify({"status": "ok"}), 200
 
 
+# ------------------------------------------------------------------
 @app.post("/encode")
 def encode():
     """
@@ -550,11 +512,5 @@ def metrics():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # HF Spaces uses port 7860
     port = int(os.environ.get("PORT", 7860))
-    # Always listen on 0.0.0.0 for external access
-    host = os.environ.get("HOST", "0.0.0.0")
-    debug = os.environ.get("FLASK_ENV", "production") == "development"
-    
-    logger.info("Starting Flask app on %s:%d (debug=%s)", host, port, debug)
-    app.run(host=host, port=port, debug=debug, threaded=True)
+    app.run(debug=False, host="0.0.0.0", port=port)

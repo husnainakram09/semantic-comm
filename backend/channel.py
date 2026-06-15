@@ -20,6 +20,7 @@ SNR presets (used in the self-test and as named constants):
 
 import json
 import logging
+import math
 import sys
 
 import numpy as np
@@ -216,10 +217,12 @@ def simulate_channel(
     """
     # ── Normalise input ──────────────────────────────────────────────────────
     x = np.array(embedding, dtype=np.float32)
-    if x.ndim != 1:
+    if x.ndim != 1 or x.size == 0:
         raise ValueError(
-            f"embedding must be a 1-D array, got shape {x.shape}."
+            f"embedding must be a non-empty 1-D array, got shape {x.shape}."
         )
+    if not math.isfinite(snr_db):
+        raise ValueError(f"snr_db must be a finite number, got {snr_db!r}.")
 
     # ── Pre-compute channel statistics from the clean signal ─────────────────
     signal_power: float = float(np.mean(x ** 2))
