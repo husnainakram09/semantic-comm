@@ -1,10 +1,10 @@
 import { useState, useRef, useCallback } from "react";
-import axios from "axios";
 import ChannelConfig from "../components/ChannelConfig";
 import ImagePanel from "../components/ImagePanel";
 import MetricsDisplay from "../components/MetricsDisplay";
 import PipelineStatus from "../components/PipelineStatus";
 import PipelineVisualizer from "../components/PipelineVisualizer";
+import api from "../services/api";
 
 const INITIAL_CHANNEL = { type: "awgn", snr: 10 };
 
@@ -56,13 +56,13 @@ export default function Demo() {
       setStage("encoding");
       const formData = new FormData();
       formData.append("image", imageFile);
-      const encodeRes = await axios.post("/api/encode", formData);
+      const encodeRes = await api.post("/encode", formData);
       const { embedding, caption: encodedCaption } = encodeRes.data;
       setCaption(encodedCaption);
 
       // Step 2: Transmit
       setStage("transmitting");
-      const transmitRes = await axios.post("/api/transmit", {
+      const transmitRes = await api.post("/transmit", {
         embedding,
         channel_type: channel.type,
         snr_db: channel.snr,
@@ -71,18 +71,24 @@ export default function Demo() {
 
       // Step 3: Decode
       setStage("decoding");
-      const decodeRes = await axios.post("/api/decode", {
+      const decodeRes = await api.post("/decode", {
         noisy_embedding,
         snr_db,
         original_caption: encodedCaption,
       });
-      const { reconstructed_image } = decodeRes.data;
+      const reconstructed_image = decodeRes.data.reconstructed_image_b64;
 
       // Step 4: Metrics
-      const metricsRes = await axios.post("/api/metrics", {
-        original_image: imagePreview,
-        reconstructed_image,
-      });
+      const metricsData = new FormData();
+      metricsData.append("original_image", imageFile);
+      metricsData.append("reconstructed_image_b64", reconstructed_image);
+      metricsData.append("original_caption", encodedCaption);
+      metricsData.append("recovered_caption", decodeRes.data.recovered_caption);
+      metricsData.append(
+        "compression_ratio",
+        transmitRes.data.bandwidth_savings?.compression_ratio || 1
+      );
+      const metricsRes = await api.post("/metrics", metricsData);
 
       setResults({
         reconstructed: reconstructed_image,
